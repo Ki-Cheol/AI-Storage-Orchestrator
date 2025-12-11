@@ -54,6 +54,9 @@ type MigrationDetails struct {
 	// PV checkpoint information
 	CheckpointPath  string             `json:"checkpoint_path,omitempty"`
 	PVClaimName     string             `json:"pv_claim_name,omitempty"`
+	
+	// New pod information after migration
+	NewPodName      string             `json:"new_pod_name,omitempty"`
 }
 
 // ResourceUsage represents CPU and memory usage

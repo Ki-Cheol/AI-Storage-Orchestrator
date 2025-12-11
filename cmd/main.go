@@ -21,11 +21,6 @@ func main() {
 	flag.Parse()
 
 	log.Println("Starting AI Storage Orchestrator...")
-	log.Printf("논문 기반 Pod 마이그레이션 오케스트레이터 시작")
-	log.Printf("- Persistent Volume을 활용한 컨테이너 상태 저장")
-	log.Printf("- 완료된 컨테이너 제외한 최적화된 재배포")
-	log.Printf("- CPU/메모리 사용량 50%/40% 절감 목표")
-
 	// Initialize Kubernetes client
 	k8sClient, err := k8s.NewClient(*kubeconfig)
 	if err != nil {
@@ -61,7 +56,6 @@ func main() {
 	}()
 
 	log.Printf("AI Storage Orchestrator is ready to handle migration requests")
-	log.Printf("오케스트레이터가 마이그레이션 요청을 처리할 준비가 되었습니다")
 
 	// Wait for interrupt signal
 	<-quit

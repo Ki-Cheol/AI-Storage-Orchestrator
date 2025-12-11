@@ -33,6 +33,53 @@
 2. **체크포인트 저장**: Persistent Volume에 컨테이너 상태 저장
 3. **최적화된 재배포**: 실행 중인 컨테이너만으로 새 Pod 생성
 
+## 🧭 오케스트레이션 관점에서 본 시스템 동작
+
+- **API 게이트웨이 역할의 HTTP 서버** (`cmd/main.go`, `pkg/apis/handler.go`)
+  - `POST /api/v1/migrations` 요청을 수신하면 JSON 검증, 타임아웃 기본값 설정 후 컨트롤러에 위임
+  - `GET /api/v1/migrations/:id`와 `/metrics` 엔드포인트로 상태·메트릭을 실시간 노출
+- **MigrationController** (`pkg/controller/migration.go`)
+  - 요청마다 `MigrationJob`을 생성해 내부 맵에 저장하고 고루틴으로 실행
+  - 상태 변경은 `sync.RWMutex`로 보호되어 다중 요청 시에도 일관성 유지
+  - 진행 현황, PV 체크포인트 경로, 새 Pod 이름, 리소스 사용량을 `MigrationDetails`에 누적
+- **Kubernetes 연동 레이어** (`pkg/k8s/client.go`)
+  - Pod 조회, 컨테이너 상태 분석, PVC 생성, 최적화된 Pod 생성, Ready 대기, 메트릭 수집까지 모든 실제 연산을 Kubernetes API/metrics API로 수행
+  - 오케스트레이터는 Control Plane에서 명령만 내리고 실제 작업은 클러스터가 처리하므로, 장애 노드와 독립적으로 동작
+- **운영 관점 KPI 노출**
+  - `MigrationMetrics`에 전체/성공/실패 횟수, 평균 소요시간, 실측 기반 CPU·메모리 절감율 저장
+  - 외부 모니터링 시스템이 API를 폴링하면 즉시 운영 현황을 파악 가능
+
+## 🔄 실제 마이그레이션 파이프라인 (실행 기반)
+
+1. **요청 수신 및 검증**
+   - `handler.createMigration()`이 JSON을 파싱하고 필수 필드·노드 중복·타임아웃 양수 여부를 검사
+   - 통과 시 `StartMigration()` 호출과 동시에 HTTP 202 응답 반환 (비동기 수행)
+2. **작업 생성과 상태 관리**
+   - `StartMigration()`은 UUID 기반 ID를 생성하고 `context.WithTimeout`으로 전체 작업 타임아웃을 설정
+   - `MigrationJob`이 `migrations` 맵에 저장되어 이후 조회 API가 동일한 상태를 반환
+3. **컨테이너 상태 캡처**
+   - `captureContainerStates()`가 원본 Pod의 `ContainerStatuses`를 읽어 `running`/`waiting`/`completed` 판별
+   - 동시에 `metrics.k8s.io`로부터 실제 CPU(cores)/메모리(bytes)를 수집해 `OriginalResources`에 저장
+4. **체크포인트 PVC 생성 (옵션 PreservePV=true)**
+   - `createCheckpoint()` → `k8sClient.CreatePersistentVolumeClaim()` 호출
+   - AccessMode=RWO, 기본 크기 1Gi, `migration-checkpoint` 라벨로 생성되어 새 Pod가 바로 붙을 수 있음
+5. **최적화된 Pod 생성**
+   - `CreateOptimizedPod()`가 실행 대상 컨테이너만 남긴 새 스펙을 만들고, 필요 시 `checkpoint-volume`을 마운트
+   - 생성 직후 `WaitForPodReady()`로 최대 5분까지 Ready 상태를 감시해 실제 서비스 전환을 보장
+   - 새 Pod 이름이 `MigrationDetails.NewPodName`에 저장되어 후속 메트릭 수집에 사용
+6. **원본 Pod 제거**
+   - `deleteOriginalPod()`가 그레이스풀 삭제를 시도 (실패해도 경고만 출력해 데이터 손실 없이 진행)
+7. **실측 메트릭 수집**
+   - 30초 안정화 후 `collectPostMigrationMetrics()`가 새 Pod의 실제 CPU/메모리를 다시 조회
+   - 조회 실패 시에만 시뮬레이션 값(50%/40%)을 임시로 기록하여 운영자가 원인을 추적할 수 있도록 로그 남김
+8. **완료 및 메트릭 업데이트**
+   - `completeMigration()`이 종료 시간·소요 시간 기록, 총/성공 횟수 증가, 실측 절감율 계산
+   - 이후 `GetMetrics()` API가 최신 KPI를 제공
+
+### 운영 시사점
+- 오케스트레이터는 **API 호출 → 컨트롤러 → Kubernetes API** 흐름으로 구성되어 있으며, 각 단계가 로그와 메트릭을 남겨 재현 가능
+- PVC 기반 상태 보존, 실행 컨테이너 선별, Ready 검증, 실측 메트릭 보고까지 모두 실제 클러스터에서 수행되는 절차만 포함되어 있어 논문 의존 없이 현장 적용 가능
+
 ## 🚀 빠른 시작
 
 ### 사전 요구사항
